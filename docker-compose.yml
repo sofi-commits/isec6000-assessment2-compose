@@ -1,0 +1,47 @@
+services:
+  # Docker in Docker sidecar. Runs its own isolated Docker daemon that
+  # Jenkins talks to over TLS, instead of Jenkins touching the host's
+  # real Docker daemon directly.
+  docker:
+    image: docker:28.3-dind
+    container_name: jenkins-docker
+    privileged: true                 # required for DinD to manage containers, a known trade off
+    environment:
+      DOCKER_TLS_CERTDIR: /certs     # tells the daemon to generate TLS certs for client authentication
+    volumes:
+      - jenkins-docker-certs:/certs/client   # shares the generated client certs with the jenkins service
+      - jenkins-data:/var/jenkins_home       # so Jenkins build artefacts land in the same persisted volume
+    networks:
+      - jenkins-net
+    expose:
+      - 2376                         # Docker daemon's TLS port, only reachable inside jenkins-net, not the host
+
+  # The Jenkins controller itself.
+  jenkins:
+    build:
+      context: ./jenkins
+      dockerfile: Dockerfile
+    container_name: jenkins
+    user: "1000:1000"                # explicit non root user, the jenkins image's own default uid, stated here deliberately rather than left implicit
+    environment:
+      DOCKER_HOST: tcp://docker:2376       # points Jenkins at the DinD sidecar, not the host daemon
+      DOCKER_CERT_PATH: /certs/client
+      DOCKER_TLS_VERIFY: "1"               # enforce TLS verification between Jenkins and the DinD sidecar
+    volumes:
+      - jenkins-data:/var/jenkins_home     # persists Jenkins config, jobs, build history, and plugins across restarts
+      - jenkins-docker-certs:/certs/client:ro   # read only, Jenkins only needs to present the certs, not generate them
+    ports:
+      - "127.0.0.1:8080:8080"        # bound to localhost only, reachable only via SSH tunnel, not the open internet
+      - "127.0.0.1:50000:50000"      # agent connection port, same restriction
+    networks:
+      - jenkins-net
+    depends_on:
+      - docker
+
+volumes:
+  jenkins-data:            # persists Jenkins home directory: jobs, plugins, build history, artefacts
+  jenkins-docker-certs:    # persists TLS certs shared between jenkins and the docker sidecar
+
+networks:
+  jenkins-net:
+    driver: bridge          # isolated internal network so the DinD daemon is not reachable outside this Compose stack
